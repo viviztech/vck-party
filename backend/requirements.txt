@@ -1,0 +1,75 @@
+# FastAPI and Server
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+gunicorn==21.2.0
+python-multipart==0.0.6
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Database - PostgreSQL
+sqlalchemy==2.0.25
+asyncpg==0.29.0
+alembic==1.13.1
+geoalchemy2==0.14.3
+sqlalchemy-utils==0.41.1
+
+# Database - MongoDB
+motor==3.3.2
+pymongo==4.6.1
+
+# Redis and Celery
+redis==5.0.1
+celery==5.3.4
+
+# Validation and Serialization
+pydantic==2.5.3
+pydantic-settings==2.1.0
+email-validator==2.1.0
+phonenumbers==8.13.27
+
+# HTTP Client
+httpx==0.26.0
+aiohttp==3.9.1
+
+# Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# SMS and Notifications
+twilio==8.10.0
+
+# AWS SDK (for S3, SNS)
+boto3==1.34.14
+
+# Data Science
+pandas==2.1.4
+numpy==1.26.3
+scikit-learn==1.4.0
+
+# NLP and Sentiment Analysis
+transformers==4.36.2
+torch==2.1.2
+nltk==3.8.1
+
+# Utilities
+python-dotenv==1.0.0
+pyyaml==6.0.1
+python-dateutil==2.8.2
+pytz==2023.3.post1
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+httpx==0.26.0
+
+# Logging and Monitoring
+structlog==24.1.0
+sentry-sdk[fastapi]==1.39.1
+
+# Development
+black==23.12.1
+isort==5.13.2
+flake8==7.0.0
+mypy==1.8.0
+python-multipart

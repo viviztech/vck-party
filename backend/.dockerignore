@@ -1,0 +1,91 @@
+# =============================================================================
+# Docker Ignore File for VCK Backend
+# =============================================================================
+
+# Git and Version Control
+.git
+.gitignore
+.gitattributes
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv/
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
+cover/
+.tox/
+.nox/
+
+# Documentation
+docs/_build/
+docs/.doctrees/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# OS files
+.DS_Store
+Thumbs.db
+*.bak
+*.tmp
+*.temp
+
+# Local development files
+*.local
+.env.example
+.env.*
+!env.example
+
+# Docker
+docker-compose*.yml
+docker-compose*.override.yml
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Alembic migrations (keep versions dir)
+alembic/versions/*.py
+!alembic/versions/__init__.py
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Database backups
+*.backup
+*.dump
+*.sql

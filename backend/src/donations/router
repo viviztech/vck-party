@@ -1,0 +1,624 @@
+"""
+Donation Router
+API routes for donation management.
+"""
+
+from datetime import datetime, timezone
+from uuid import UUID
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.core.database import get_db
+from src.core.exceptions import (
+    NotFoundError,
+    AlreadyExistsError,
+    ValidationError,
+    AuthorizationError,
+    BusinessError,
+)
+from src.core.security import get_current_user
+from src.auth.models import User
+
+from src.donations.schemas import (
+    DonationCreate,
+    DonationUpdate,
+    DonationResponse,
+    DonationDetailResponse,
+    DonationListResponse,
+    DonationSearchFilters,
+    DonationInitiate,
+    DonationInitiateResponse,
+    DonationVerify,
+    MyDonationsResponse,
+    CampaignCreate,
+    CampaignUpdate,
+    CampaignResponse,
+    CampaignDetailResponse,
+    CampaignListResponse,
+    ReceiptResponse,
+    ReceiptGenerate,
+    TransactionResponse,
+    DonationStats,
+    DonationStatsResponse,
+    DonationDashboard,
+    DonationDashboardResponse,
+    RazorpayWebhook,
+    PaymentWebhookResponse,
+    ApiResponse,
+)
+from src.donations.deps import (
+    get_donation_by_id,
+    check_donation_view_permission,
+    check_donation_edit_permission,
+    get_campaign_by_id,
+    check_campaign_edit_permission,
+    require_donation_admin,
+    get_current_member_id,
+)
+from src.donations.crud import (
+    DonationCRUD,
+    CampaignCRUD,
+    ReceiptCRUD,
+    TransactionCRUD,
+    DonationStatsCRUD,
+    PaymentGatewayCRUD,
+)
+from src.donations.models import (
+    PaymentStatus,
+    Donation,
+    DonationCampaign,
+)
+
+
+router = APIRouter(prefix="/donations", tags=["Donations"])
+
+
+# =============================================================================
+# Health Check
+# =============================================================================
+
+@router.get("/health")
+async def donations_health_check():
+    """Health check endpoint for donations service."""
+    return {"status": "healthy", "service": "donations"}
+
+
+# =============================================================================
+# Donations CRUD
+# =============================================================================
+
+@router.get("", response_model=DonationListResponse)
+async def list_donations(
+    request: Request,
+    search: Optional[str] = None,
+    campaign_id: Optional[UUID] = None,
+    member_id: Optional[UUID] = None,
+    payment_status: Optional[List[str]] = Query(None),
+    payment_method: Optional[List[str]] = Query(None),
+    donation_type: Optional[List[str]] = Query(None),
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
+    page: int = 1,
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    List/search donations with filters.
+    
+    Supports pagination and filtering by various criteria.
+    Admin users can see all donations, regular users see their own.
+    """
+    # Validate pagination
+    page = max(page, 1)
+    limit = min(max(limit, 1), 100)
+    
+    # Build filters
+    filters = DonationSearchFilters(
+        search=search,
+        campaign_id=campaign_id,
+        member_id=member_id,
+        payment_status=payment_status,
+        payment_method=payment_method,
+        donation_type=donation_type,
+        from_date=from_date,
+        to_date=to_date,
+        min_amount=min_amount,
+        max_amount=max_amount,
+    )
+    
+    # If not admin, only show own donations
+    if not current_user.is_admin():
+        member_id = await get_current_member_id(current_user)
+        filters.member_id = member_id
+    
+    donations, total = await DonationCRUD.search(db, filters, page, limit)
+    
+    total_pages = (total + limit - 1) // limit if total > 0 else 1
+    
+    return DonationListResponse(
+        donations=[DonationResponse.model_validate(d) for d in donations],
+        total=total,
+        page=page,
+        limit=limit,
+        total_pages=total_pages,
+    )
+
+
+@router.get("/my", response_model=MyDonationsResponse)
+async def get_my_donations(
+    page: int = 1,
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get current user's donations.
+    
+    Returns all donations made by the authenticated user.
+    """
+    member_id = await get_current_member_id(current_user)
+    if not member_id:
+        raise AuthorizationError(message="User is not a member")
+    
+    page = max(page, 1)
+    limit = min(max(limit, 1), 100)
+    
+    donations, total, total_amount = await DonationCRUD.get_by_member(
+        db, member_id, page, limit
+    )
+    
+    return MyDonationsResponse(
+        donations=[DonationResponse.model_validate(d) for d in donations],
+        total=total,
+        total_amount=float(total_amount),
+    )
+
+
+@router.post("", response_model=DonationResponse, status_code=status.HTTP_201_CREATED)
+async def create_donation(
+    donation_data: DonationCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create a new donation.
+    
+    The authenticated user will be linked to the donation if they are a member.
+    """
+    member_id = await get_current_member_id(current_user)
+    
+    donation = await DonationCRUD.create(db, donation_data, member_id=member_id)
+    return DonationResponse.model_validate(donation)
+
+
+@router.post("/initiate", response_model=DonationInitiateResponse)
+async def initiate_donation(
+    initiate_data: DonationInitiate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Initiate a donation payment.
+    
+    Creates a donation record and initiates payment with the gateway.
+    """
+    member_id = await get_current_member_id(current_user)
+    
+    # Create donation
+    donation_create = DonationCreate(
+        campaign_id=initiate_data.campaign_id,
+        amount=initiate_data.amount,
+        payment_method=initiate_data.payment_method,
+        donor_name=initiate_data.donor_name,
+        donor_phone=initiate_data.donor_phone,
+        donor_email=initiate_data.donor_email,
+        donor_pan=initiate_data.donor_pan,
+        notes=initiate_data.notes,
+        is_anonymous=initiate_data.is_anonymous,
+    )
+    
+    donation = await DonationCRUD.create(db, donation_create, member_id=member_id)
+    
+    # Initiate payment with gateway
+    payment_result = await PaymentGatewayCRUD.initiate_razorpay_payment(
+        db, donation.id, initiate_data.amount
+    )
+    
+    return DonationInitiateResponse(
+        donation_id=donation.id,
+        payment_order_id=payment_result.get("order_id"),
+        amount=initiate_data.amount,
+        currency="INR",
+        payment_link=payment_result.get("payment_link"),
+        payment_gateway="razorpay",
+    )
+
+
+@router.get("/{donation_id}", response_model=DonationDetailResponse)
+async def get_donation(
+    donation_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get donation by ID with full details.
+    """
+    donation = await DonationCRUD.get_detailed(db, donation_id)
+    if not donation:
+        raise NotFoundError(resource="Donation", resource_id=str(donation_id))
+    
+    # Build detail response
+    response = DonationDetailResponse.model_validate(donation)
+    
+    # Add campaign name if exists
+    if donation.campaign:
+        response.campaign_name = donation.campaign.name
+    
+    return response
+
+
+@router.put("/{donation_id}", response_model=DonationResponse)
+async def update_donation(
+    donation_id: UUID,
+    donation_data: DonationUpdate,
+    donation: Donation = Depends(check_donation_edit_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update a donation.
+    
+    Requires admin permission.
+    """
+    update_data = donation_data.model_dump(exclude_unset=True)
+    updated = await DonationCRUD.update(db, Donation, donation_id, update_data)
+    
+    if not updated:
+        raise NotFoundError(resource="Donation", resource_id=str(donation_id))
+    
+    return DonationResponse.model_validate(updated)
+
+
+@router.delete("/{donation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_donation(
+    donation_id: UUID,
+    donation: Donation = Depends(check_donation_edit_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Delete (soft-delete) a donation.
+    
+    Requires admin permission.
+    Cannot delete completed donations.
+    """
+    success = await DonationCRUD.delete(db, Donation, donation_id)
+    if not success:
+        raise NotFoundError(resource="Donation", resource_id=str(donation_id))
+
+
+@router.post("/{donation_id}/verify", response_model=ApiResponse)
+async def verify_donation(
+    donation_id: UUID,
+    verify_data: DonationVerify,
+    donation: Donation = Depends(get_donation_by_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Verify a donation payment.
+    
+    Used to verify payment after gateway callback.
+    """
+    if donation.payment_status == PaymentStatus.COMPLETED.value:
+        return ApiResponse(
+            success=True,
+            message="Donation already verified",
+        )
+    
+    success = await PaymentGatewayCRUD.verify_razorpay_payment(
+        db, donation_id, verify_data.payment_id, verify_data.signature
+    )
+    
+    if success:
+        return ApiResponse(
+            success=True,
+            message="Payment verified successfully",
+        )
+    else:
+        raise BusinessError(message="Payment verification failed")
+
+
+@router.post("/{donation_id}/receipt", response_model=ReceiptResponse)
+async def generate_receipt(
+    donation_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate a receipt for a donation.
+    
+    Only for completed donations.
+    """
+    member_id = await get_current_member_id(current_user)
+    if not member_id:
+        raise AuthorizationError(message="User is not a member")
+    
+    try:
+        receipt = await ReceiptCRUD.generate_receipt(db, donation_id, generated_by_id=member_id)
+        return ReceiptResponse.model_validate(receipt)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=e.to_dict())
+    except AlreadyExistsError as e:
+        raise HTTPException(status_code=409, detail=e.to_dict())
+    except BusinessError as e:
+        raise HTTPException(status_code=400, detail=e.to_dict())
+
+
+# =============================================================================
+# Campaigns
+# =============================================================================
+
+@router.get("/campaigns", response_model=CampaignListResponse)
+async def list_campaigns(
+    status_filter: Optional[str] = None,
+    unit_id: Optional[UUID] = None,
+    is_active: Optional[bool] = None,
+    page: int = 1,
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    List donation campaigns with filters.
+    """
+    page = max(page, 1)
+    limit = min(max(limit, 1), 100)
+    
+    campaigns, total = await CampaignCRUD.search(
+        db, status=status_filter, unit_id=unit_id, is_active=is_active, page=page, limit=limit
+    )
+    
+    total_pages = (total + limit - 1) // limit if total > 0 else 1
+    
+    return CampaignListResponse(
+        campaigns=[CampaignResponse.model_validate(c) for c in campaigns],
+        total=total,
+        page=page,
+        limit=limit,
+        total_pages=total_pages,
+    )
+
+
+@router.get("/campaigns/active", response_model=List[CampaignResponse])
+async def get_active_campaigns(
+    limit: int = Query(10, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get active donation campaigns.
+    """
+    campaigns = await CampaignCRUD.get_active_campaigns(db, limit)
+    return [CampaignResponse.model_validate(c) for c in campaigns]
+
+
+@router.post("/campaigns", response_model=CampaignResponse, status_code=status.HTTP_201_CREATED)
+async def create_campaign(
+    campaign_data: CampaignCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create a new donation campaign.
+    
+    Requires admin permission.
+    """
+    member_id = await get_current_member_id(current_user)
+    
+    campaign = await CampaignCRUD.create(db, campaign_data, created_by_id=member_id)
+    return CampaignResponse.model_validate(campaign)
+
+
+@router.get("/campaigns/{campaign_id}", response_model=CampaignDetailResponse)
+async def get_campaign(
+    campaign_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get campaign by ID with details.
+    """
+    campaign = await CampaignCRUD.get_detailed(db, campaign_id)
+    if not campaign:
+        raise NotFoundError(resource="DonationCampaign", resource_id=str(campaign_id))
+    
+    response = CampaignDetailResponse.model_validate(campaign)
+    response.donations_count = len(campaign.donations)
+    response.donors_count = len(set(d.donor_phone or d.member_id for d in campaign.donations))
+    
+    if campaign.donations:
+        completed_donations = [d for d in campaign.donations 
+                              if d.payment_status == PaymentStatus.COMPLETED.value]
+        if completed_donations:
+            response.average_donation = sum(float(d.amount) for d in completed_donations) / len(completed_donations)
+    
+    return response
+
+
+@router.put("/campaigns/{campaign_id}", response_model=CampaignResponse)
+async def update_campaign(
+    campaign_id: UUID,
+    campaign_data: CampaignUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update a campaign.
+    
+    Requires admin permission.
+    """
+    updated = await CampaignCRUD.update(db, campaign_id, campaign_data)
+    if not updated:
+        raise NotFoundError(resource="DonationCampaign", resource_id=str(campaign_id))
+    
+    return CampaignResponse.model_validate(updated)
+
+
+# =============================================================================
+# Statistics
+# =============================================================================
+
+@router.get("/stats", response_model=DonationStatsResponse)
+async def get_donation_stats(
+    unit_id: Optional[UUID] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get donation statistics.
+    
+    Returns aggregated statistics about donations.
+    """
+    stats_data = await DonationStatsCRUD.get_stats(db, unit_id, from_date, to_date)
+    return DonationStatsResponse(
+        stats=DonationStats(**stats_data),
+        generated_at=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/dashboard", response_model=DonationDashboardResponse)
+async def get_donation_dashboard(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get donation dashboard data.
+    
+    Returns dashboard data for the donations module.
+    """
+    dashboard_data = await DonationStatsCRUD.get_dashboard(db)
+    return DonationDashboardResponse(
+        dashboard=DonationDashboard(**dashboard_data),
+        generated_at=datetime.now(timezone.utc),
+    )
+
+
+# =============================================================================
+# Transactions
+# =============================================================================
+
+@router.get("/{donation_id}/transactions", response_model=List[TransactionResponse])
+async def get_donation_transactions(
+    donation_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get transactions for a donation.
+    """
+    transactions = await TransactionCRUD.get_by_donation(db, donation_id)
+    return [TransactionResponse.model_validate(t) for t in transactions]
+
+
+# =============================================================================
+# Webhooks
+# =============================================================================
+
+@router.post("/webhook/razorpay", response_model=PaymentWebhookResponse)
+async def razorpay_webhook(
+    webhook_data: RazorpayWebhook,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Handle Razorpay webhook events.
+    
+    Processes payment.success, payment.failed, etc.
+    """
+    event = webhook_data.event
+    payload = webhook_data.payload
+    
+    try:
+        if event == "payment.success":
+            # Handle successful payment
+            payment_id = payload.get("payload", {}).get("payment", {}).get("entity", {}).get("id")
+            order_id = payload.get("payload", {}).get("order", {}).get("entity", {}).get("id")
+            
+            # Find donation by order_id
+            result = await db.execute(
+                select(Donation).where(Donation.payment_order_id == order_id)
+            )
+            donation = result.scalar_one_or_none()
+            
+            if donation:
+                await DonationCRUD.update_status(
+                    db, donation.id,
+                    PaymentStatus.COMPLETED.value,
+                    transaction_id=payment_id
+                )
+                
+                return PaymentWebhookResponse(
+                    success=True,
+                    donation_id=donation.id,
+                    message="Payment processed successfully",
+                )
+        
+        elif event == "payment.failed":
+            # Handle failed payment
+            payment_id = payload.get("payload", {}).get("payment", {}).get("entity", {}).get("id")
+            order_id = payload.get("payload", {}).get("order", {}).get("entity", {}).get("id")
+            
+            result = await db.execute(
+                select(Donation).where(Donation.payment_order_id == order_id)
+            )
+            donation = result.scalar_one_or_none()
+            
+            if donation:
+                await DonationCRUD.update_status(
+                    db, donation.id,
+                    PaymentStatus.FAILED.value,
+                    transaction_id=payment_id
+                )
+                
+                return PaymentWebhookResponse(
+                    success=True,
+                    donation_id=donation.id,
+                    message="Payment failure recorded",
+                )
+        
+        # For other events, just acknowledge
+        return PaymentWebhookResponse(
+            success=True,
+            message=f"Event {event} received",
+        )
+        
+    except Exception as e:
+        return PaymentWebhookResponse(
+            success=False,
+            message=f"Error processing webhook: {str(e)}",
+        )
+
+
+# =============================================================================
+# Receipts
+# =============================================================================
+
+@router.get("/receipts/{receipt_number}", response_model=ReceiptResponse)
+async def get_receipt(
+    receipt_number: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get receipt by receipt number.
+    """
+    receipt = await ReceiptCRUD.get_by_number(db, receipt_number)
+    if not receipt:
+        raise NotFoundError(resource="Receipt", resource_id=receipt_number)
+    
+    return ReceiptResponse.model_validate(receipt)

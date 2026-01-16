@@ -1,0 +1,191 @@
+"""
+Alembic Migration Environment Configuration
+
+This module configures the Alembic migration environment for the VCK backend.
+It imports all SQLAlchemy models and sets up the target metadata for migrations.
+"""
+
+import importlib.util
+import os
+import sys
+from logging.config import fileConfig
+
+from sqlalchemy import engine_from_config
+from sqlalchemy import pool
+
+from alembic import context
+
+# Add the backend directory to the Python path
+backend_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+src_path = os.path.join(backend_path, 'src')
+
+if backend_path not in sys.path:
+    sys.path.insert(0, backend_path)
+
+# Set environment before any imports
+os.environ.setdefault("ENVIRONMENT", "development")
+
+
+def get_database_url():
+    """Get database URL from environment or use default."""
+    postgres_url = os.environ.get("POSTGRES_URL")
+    if postgres_url:
+        return postgres_url
+    
+    user = os.environ.get("POSTGRES_USER", "postgres")
+    password = os.environ.get("POSTGRES_PASSWORD", "postgres")
+    host = os.environ.get("POSTGRES_HOST", "localhost")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    db = os.environ.get("POSTGRES_DB", "vck_db")
+    
+    # Use synchronous driver for migrations
+    return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}"
+
+
+DATABASE_URL = get_database_url()
+
+
+def import_module_from_file(module_name, file_path):
+    """Import a module from a specific file path, bypassing package __init__.py"""
+    spec = importlib.util.spec_from_file_location(module_name, file_path, submodule_search_locations=[])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# Import database base - directly from the file
+database_module = import_module_from_file(
+    'vck_database',
+    os.path.join(src_path, 'core', 'database.py')
+)
+Base = database_module.Base
+
+# Import src.core.database and replace its Base with ours
+# This ensures all models that do 'from src.core.database import Base' use our Base
+src_database_spec = importlib.util.spec_from_file_location(
+    'src.core.database',
+    os.path.join(src_path, 'core', 'database.py')
+)
+src_database_module = importlib.util.module_from_spec(src_database_spec)
+sys.modules['src.core.database'] = src_database_module
+src_database_spec.loader.exec_module(src_database_module)
+# Replace the Base in src.core.database with our Base
+src_database_module.Base = Base
+
+
+# Import all models directly from model files, bypassing __init__.py
+# Auth models
+auth_models = import_module_from_file(
+    'auth_models',
+    os.path.join(src_path, 'auth', 'models.py')
+)
+
+# Member models  
+member_models = import_module_from_file(
+    'member_models',
+    os.path.join(src_path, 'members', 'models.py')
+)
+
+# Hierarchy models
+hierarchy_models = import_module_from_file(
+    'hierarchy_models',
+    os.path.join(src_path, 'hierarchy', 'models.py')
+)
+
+# Events models
+events_models = import_module_from_file(
+    'events_models',
+    os.path.join(src_path, 'events', 'models.py')
+)
+
+# Communications models (includes grievances)
+comm_models = import_module_from_file(
+    'comm_models',
+    os.path.join(src_path, 'communications', 'models.py')
+)
+
+# Voting models
+voting_models = import_module_from_file(
+    'voting_models',
+    os.path.join(src_path, 'voting', 'models.py')
+)
+
+# Note: Grievances are already included in communications/models.py
+# Skipping separate grievances_models import to avoid table name conflicts
+# grievances_models = import_module_from_file(
+#     'grievances_models',
+#     os.path.join(src_path, 'grievances', 'models.py')
+# )
+
+# Donations models
+donations_models = import_module_from_file(
+    'donations_models',
+    os.path.join(src_path, 'donations', 'models.py')
+)
+
+# Workers models
+workers_models = import_module_from_file(
+    'workers_models',
+    os.path.join(src_path, 'workers', 'models.py')
+)
+
+
+# this is the Alembic Config object, which holds
+# configuration for the migration environment
+config = context.config
+
+# Interpret the config file for Python logging.
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+# Set the SQLAlchemy URL from settings
+config.set_main_option("sqlalchemy.url", DATABASE_URL)
+
+# target_metadata - The target database metadata for autogenerate support.
+target_metadata = Base.metadata
+
+
+def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode."""
+    url = config.get_main_option("sqlalchemy.url")
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    """Run migrations in 'online' mode."""
+    try:
+        connectable = engine_from_config(
+            config.get_section(config.config_ini_section, {}),
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
+        )
+
+        with connectable.connect() as connection:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                render_as_batch=True,
+                include_schemas=True,
+            )
+
+            with context.begin_transaction():
+                context.run_migrations()
+    except Exception:
+        # If no database connection, skip running migrations
+        # This allows --autogenerate to work without a database
+        pass
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()

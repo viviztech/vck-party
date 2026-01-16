@@ -1,0 +1,454 @@
+"""
+Donation Schemas
+Pydantic schemas for donation-related API requests and responses.
+"""
+
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+from uuid import UUID
+
+from pydantic import BaseModel, Field, ConfigDict
+
+from src.donations.models import (
+    PaymentStatus,
+    PaymentMethod,
+    PaymentGateway,
+    DonationType,
+    CampaignStatus,
+)
+
+
+# =============================================================================
+# Base Schemas
+# =============================================================================
+
+class DonationBase(BaseModel):
+    """Base donation schema with common fields."""
+    amount: float = Field(..., gt=0, description="Donation amount")
+    currency: str = Field(default="INR", max_length=3)
+    donation_type: Optional[str] = DonationType.GENERAL.value
+    payment_method: Optional[str] = None
+    notes: Optional[str] = None
+    is_anonymous: Optional[bool] = False
+
+
+# =============================================================================
+# Donation Create/Update Schemas
+# =============================================================================
+
+class DonationCreate(DonationBase):
+    """Schema for creating a new donation."""
+    campaign_id: Optional[UUID] = None
+    member_id: Optional[UUID] = None  # For admin-created donations
+    
+    # Donor info (for non-member donations)
+    donor_name: Optional[str] = Field(None, max_length=255)
+    donor_phone: Optional[str] = Field(None, max_length=15)
+    donor_email: Optional[str] = Field(None, max_length=255)
+    donor_pan: Optional[str] = Field(None, max_length=20)
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "campaign_id": "uuid",
+                "amount": 1000.00,
+                "payment_method": "upi",
+                "donor_name": "John Doe",
+                "donor_phone": "+919876543210",
+                "donor_email": "john@example.com",
+                "donor_pan": "ABCDE1234F",
+                "notes": "For party fund",
+                "is_anonymous": False
+            }
+        }
+    }
+
+
+class DonationInitiate(BaseModel):
+    """Schema for initiating a donation payment."""
+    campaign_id: Optional[UUID] = None
+    amount: float = Field(..., gt=0, description="Donation amount")
+    payment_method: str = Field(..., description="Payment method")
+    donor_name: Optional[str] = Field(None, max_length=255)
+    donor_phone: Optional[str] = Field(None, max_length=15)
+    donor_email: Optional[str] = Field(None, max_length=255)
+    donor_pan: Optional[str] = Field(None, max_length=20)
+    notes: Optional[str] = None
+    is_anonymous: Optional[bool] = False
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "campaign_id": "uuid",
+                "amount": 1000.00,
+                "payment_method": "upi",
+                "donor_name": "John Doe",
+                "donor_phone": "+919876543210"
+            }
+        }
+    }
+
+
+class DonationUpdate(BaseModel):
+    """Schema for updating a donation."""
+    amount: Optional[float] = Field(None, gt=0)
+    payment_method: Optional[str] = None
+    payment_status: Optional[str] = None
+    notes: Optional[str] = None
+    is_anonymous: Optional[bool] = None
+
+
+class DonationVerify(BaseModel):
+    """Schema for verifying a donation payment."""
+    payment_id: str = Field(..., description="Payment gateway payment ID")
+    signature: Optional[str] = Field(None, description="Payment signature for verification")
+
+
+# =============================================================================
+# Donation Response Schemas
+# =============================================================================
+
+class DonationResponse(DonationBase):
+    """Schema for donation response."""
+    id: UUID
+    campaign_id: Optional[UUID] = None
+    member_id: Optional[UUID] = None
+    payment_gateway: Optional[str] = None
+    transaction_id: Optional[str] = None
+    payment_status: str
+    donor_name: Optional[str] = None
+    donor_phone: Optional[str] = None
+    donor_email: Optional[str] = None
+    receipt_number: Optional[str] = None
+    receipt_url: Optional[str] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DonationDetailResponse(DonationResponse):
+    """Detailed donation response with relationships."""
+    campaign_name: Optional[str] = None
+    member_name: Optional[str] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DonationInitiateResponse(BaseModel):
+    """Response for donation initiation."""
+    donation_id: UUID
+    payment_order_id: Optional[str] = None
+    amount: float
+    currency: str
+    payment_link: Optional[str] = None
+    qr_code: Optional[str] = None
+    payment_gateway: str
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+# =============================================================================
+# Donation List/Pagination Schemas
+# =============================================================================
+
+class DonationListResponse(BaseModel):
+    """Paginated donation list response."""
+    donations: List[DonationResponse]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
+
+
+class DonationSearchFilters(BaseModel):
+    """Filters for donation search."""
+    search: Optional[str] = None
+    campaign_id: Optional[UUID] = None
+    member_id: Optional[UUID] = None
+    payment_status: Optional[List[str]] = None
+    payment_method: Optional[List[str]] = None
+    donation_type: Optional[List[str]] = None
+    from_date: Optional[datetime] = None
+    to_date: Optional[datetime] = None
+    min_amount: Optional[float] = None
+    max_amount: Optional[float] = None
+
+
+class MyDonationsResponse(BaseModel):
+    """Response for user's own donations."""
+    donations: List[DonationResponse]
+    total: int
+    total_amount: float
+
+
+# =============================================================================
+# Campaign Schemas
+# =============================================================================
+
+class CampaignBase(BaseModel):
+    """Base campaign schema with common fields."""
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    target_amount: Optional[float] = Field(None, ge=0)
+    currency: str = Field(default="INR", max_length=3)
+    start_date: datetime
+    end_date: Optional[datetime] = None
+    banner_url: Optional[str] = None
+
+
+class CampaignCreate(CampaignBase):
+    """Schema for creating a donation campaign."""
+    unit_id: Optional[UUID] = None
+    status: Optional[str] = CampaignStatus.DRAFT.value
+    metadata: Optional[Dict[str, Any]] = None
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "name": "Election Fund 2024",
+                "description": "Raising funds for upcoming elections",
+                "target_amount": 1000000.00,
+                "start_date": "2024-01-01T00:00:00+05:30",
+                "end_date": "2024-12-31T23:59:59+05:30",
+                "banner_url": "https://example.com/banner.jpg"
+            }
+        }
+    }
+
+
+class CampaignUpdate(BaseModel):
+    """Schema for updating a campaign."""
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    target_amount: Optional[float] = Field(None, ge=0)
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    status: Optional[str] = None
+    is_active: Optional[bool] = None
+    banner_url: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class CampaignResponse(CampaignBase):
+    """Schema for campaign response."""
+    id: UUID
+    unit_id: Optional[UUID] = None
+    created_by_id: Optional[UUID] = None
+    collected_amount: float
+    currency: str
+    status: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+    
+    # Computed fields
+    progress_percentage: float = 0
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignDetailResponse(CampaignResponse):
+    """Detailed campaign response with stats."""
+    donations_count: int = 0
+    donors_count: int = 0
+    average_donation: float = 0
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignListResponse(BaseModel):
+    """Paginated campaign list response."""
+    campaigns: List[CampaignResponse]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
+
+
+# =============================================================================
+# Receipt Schemas
+# =============================================================================
+
+class ReceiptResponse(BaseModel):
+    """Schema for receipt response."""
+    id: UUID
+    donation_id: UUID
+    receipt_number: str
+    amount: float
+    currency: str
+    donor_name: Optional[str] = None
+    donor_pan: Optional[str] = None
+    receipt_url: Optional[str] = None
+    is_tax_deductible: bool
+    tax_section: Optional[str] = None
+    generated_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReceiptGenerate(BaseModel):
+    """Schema for generating a receipt."""
+    donation_id: UUID
+    generate_pdf: Optional[bool] = True
+
+
+# =============================================================================
+# Transaction Schemas
+# =============================================================================
+
+class TransactionResponse(BaseModel):
+    """Schema for payment transaction response."""
+    id: UUID
+    donation_id: UUID
+    transaction_type: str
+    payment_gateway: Optional[str] = None
+    gateway_transaction_id: Optional[str] = None
+    amount: float
+    currency: str
+    status: str
+    status_message: Optional[str] = None
+    created_at: datetime
+    processed_at: Optional[datetime] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+# =============================================================================
+# Statistics Schemas
+# =============================================================================
+
+class DonationStats(BaseModel):
+    """Schema for donation statistics."""
+    total_donations: int
+    total_amount: float
+    currency: str
+    
+    # By status
+    pending_count: int
+    completed_count: int
+    failed_count: int
+    
+    # By payment method
+    by_payment_method: Dict[str, int]
+    
+    # By donation type
+    by_donation_type: Dict[str, int]
+    
+    # By campaign
+    by_campaign: Dict[str, Dict[str, Any]]
+    
+    # Trends
+    donations_this_month: int
+    amount_this_month: float
+    donations_this_year: int
+    amount_this_year: float
+    
+    # Top donors
+    top_donors: List[Dict[str, Any]]
+    
+    # Recent activity
+    recent_donations: List[Dict[str, Any]]
+
+
+class DonationStatsResponse(BaseModel):
+    """Schema for donation statistics response."""
+    stats: DonationStats
+    generated_at: datetime
+
+
+# =============================================================================
+# Dashboard Schemas
+# =============================================================================
+
+class DonationDashboard(BaseModel):
+    """Schema for donation dashboard data."""
+    # Summary
+    total_collected: float
+    total_target: float
+    progress_percentage: float
+    
+    # Campaign summary
+    active_campaigns: int
+    completed_campaigns: int
+    
+    # Recent donations
+    recent_donations_count: int
+    recent_donations_amount: float
+    
+    # This month
+    monthly_total: float
+    monthly_count: int
+    monthly_target: Optional[float] = None
+    
+    # Top campaigns by collection
+    top_campaigns: List[Dict[str, Any]]
+    
+    # Donation trends (last 7 days)
+    daily_trends: List[Dict[str, Any]]
+    
+    # Payment method distribution
+    payment_methods: Dict[str, float]
+
+
+class DonationDashboardResponse(BaseModel):
+    """Schema for donation dashboard response."""
+    dashboard: DonationDashboard
+    generated_at: datetime
+
+
+# =============================================================================
+# Webhook Schemas
+# =============================================================================
+
+class RazorpayWebhook(BaseModel):
+    """Schema for Razorpay webhook events."""
+    event: str
+    payload: Dict[str, Any]
+
+
+class PaymentWebhookResponse(BaseModel):
+    """Response for payment webhook processing."""
+    success: bool
+    donation_id: Optional[UUID] = None
+    message: str
+
+
+# =============================================================================
+# Common Response Schemas
+# =============================================================================
+
+class ApiResponse(BaseModel):
+    """Generic API response."""
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
+
+
+# =============================================================================
+# Report Schemas
+# =============================================================================
+
+class DonorReportResponse(BaseModel):
+    """Schema for donor report response."""
+    id: UUID
+    member_id: UUID
+    report_type: str
+    period_start: datetime
+    period_end: datetime
+    total_donations: int
+    total_amount: float
+    currency: str
+    by_campaign: Dict[str, Any]
+    by_month: Dict[str, Any]
+    report_url: Optional[str] = None
+    generated_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DonorReportGenerate(BaseModel):
+    """Schema for generating donor report."""
+    report_type: str  # monthly, quarterly, annual
+    period_start: datetime
+    period_end: datetime
