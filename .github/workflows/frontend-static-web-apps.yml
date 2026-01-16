@@ -66,7 +66,7 @@ jobs:
           action: "upload"
           app_location: "frontend"
           api_location: ""
-          skip_app_build: true
+          skip_app_build: false
           skip_api_build: true
           output_location: "dist"
 
